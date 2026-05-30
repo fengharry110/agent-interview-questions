@@ -6,54 +6,337 @@
 
 ## 考察重点
 
-- 是否能把问题放到「评测体系」的工程语境中分析
-- 是否能说清楚关键概念背后的系统边界和失败模式
-- 是否能给出可落地的设计方法，而不是只背定义
-- 是否关注可评测、可调试、可上线和可回滚
+- 是否理解智能体系统的 A/B 测试和传统 Web A/B 测试的差异
+- 是否能说清楚 A/B 测试的流量分割和评估方法
+- 是否了解智能体 A/B 测试的挑战（非确定性输出、长尾延迟）
+- 是否有过智能体 A/B 测试的实际经验
 
 ## 核心结论
 
-评测回答的是智能体是否稳定完成真实任务。回答这个问题时，要同时覆盖核心机制、工程取舍、失败处理和评测方式。
+智能体系统的 A/B 测试比传统 Web A/B 测试更复杂，因为输出不是固定的 HTML 页面而是动态的决策链。核心方法是：**按用户/会话粒度分流**、**用统一指标体系评估**、**跑足够长的时间消除随机性**。关键原则是：不要同时跑太多实验（互斥 + 样本量不足），不要提前下结论（智能体的表现波动大）。
 
 ## 参考回答
 
-这个问题不能只从概念层面回答。以「如何做线上AB测试」为例，面试官真正想听的是你是否理解智能体系统如何在真实环境里运行：用户输入进入系统后，系统需要判断目标、组织上下文、选择工具或流程、执行动作、观察结果，并在必要时继续迭代。
+### A/B 测试设计
 
-在「评测体系」这个主题下，重点可以围绕 任务集、成功标准、过程指标、安全评估、回归测试 展开。一个成熟回答通常先说明定义，再说明为什么重要，然后讲如果设计不好会出现什么问题，最后给出工程方案和评测方法。
+```python
+class AgentABTest:
+    """
+    智能体 A/B 测试
+    """
+    
+    def __init__(self):
+        self.traffic_split = TrafficSplitter()
+        self.metrics_collector = MetricsCollector()
+    
+    def setup_experiment(self, config: ABTestConfig) -> Experiment:
+        """
+        设置 A/B 测试实验
+        """
+        experiment = Experiment(
+            name=config.name,
+            control=config.control_version,
+            treatment=config.treatment_version,
+            traffic_split=config.traffic_split,
+            duration_days=config.duration_days,
+            min_sample_size=config.min_sample_size
+        )
+        
+        # 注册分流规则
+        self.traffic_split.register_experiment(
+            experiment.name,
+            {
+                "control": config.traffic_split['control'],
+                "treatment": config.traffic_split['treatment']
+            }
+        )
+        
+        return experiment
+    
+    def analyze_results(
+        self,
+        experiment: Experiment,
+        days: int
+    ) -> ABTestResult:
+        """
+        分析 A/B 测试结果
+        """
+        control_data = self.metrics_collector.collect(
+            experiment='control',
+            days=days
+        )
+        treatment_data = self.metrics_collector.collect(
+            experiment='treatment',
+            days=days
+        )
+        
+        return ABTestResult(
+            experiment_name=experiment.name,
+            duration_days=days,
+            sample_size={
+                'control': len(control_data),
+                'treatment': len(treatment_data)
+            },
+            metrics=self._compare_metrics(
+                control_data, treatment_data
+            ),
+            significance=self._calculate_significance(
+                control_data, treatment_data
+            ),
+            recommendation=self._generate_recommendation(
+                control_data, treatment_data
+            )
+        )
+```
 
-如果把它放到生产系统里，还需要考虑权限、日志、异常、成本和用户体验。比如系统不能默认相信模型的每一次判断，也不能把所有信息无脑塞进上下文，更不能在没有审计的情况下执行高风险工具。
+### 流量分割策略
+
+```python
+class TrafficSplitter:
+    """
+    流量分割器
+    """
+    
+    def __init__(self):
+        self.experiments: Dict[str, ExperimentConfig] = {}
+    
+    def assign_group(self, user_id: str) -> str:
+        """
+        根据用户 ID 分配实验组
+        使用一致性哈希保证同一用户始终在同一组
+        """
+        hash_val = hash(user_id) % 100
+        for exp_name, config in self.experiments.items():
+            if hash_val < config['control']:
+                return f"{exp_name}:control"
+            elif hash_val < config['control'] + config['treatment']:
+                return f"{exp_name}:treatment"
+        return "default"
+    
+    def register_experiment(
+        self,
+        name: str,
+        split: Dict[str, int]
+    ):
+        """
+        注册实验
+        split 示例: {"control": 50, "treatment": 50}
+        """
+        assert split['control'] + split['treatment'] == 100
+        self.experiments[name] = split
+```
 
 ## 深度展开
 
-第一层是机制理解：这个模块在智能体链路中处于什么位置，它的输入、输出和依赖是什么。比如它可能依赖用户意图、历史上下文、工具返回、检索结果或业务状态。
+### 智能体 A/B 测试的挑战
 
-第二层是失败模式：它可能在哪些情况下出错。常见问题包括目标理解偏差、上下文缺失、检索噪声、工具参数错误、权限不足、模型过度自信、执行循环失控，以及线上数据和离线测试不一致。
+```python
+class ABTestChallenges:
+    """
+    智能体 A/B 测试的特殊挑战
+    """
+    
+    CHALLENGES = [
+        {
+            "title": "非确定性输出",
+            "description": "同样的输入，智能体的输出可能不同",
+            "impact": "需要更大的样本量才能检测出显著差异",
+            "mitigation": "温度设为 0，增加样本量"
+        },
+        {
+            "title": "长尾延迟",
+            "description": "少数任务可能耗时极长（几十步）",
+            "impact": "平均延迟被长尾拉高，但中位数正常",
+            "mitigation": "同时看 P50、P95、P99"
+        },
+        {
+            "title": "指标关联",
+            "description": "完成率和成本负相关",
+            "impact": "单一指标提升可能掩盖其他指标恶化",
+            "mitigation": "设置复合指标作为主要决策依据"
+        },
+        {
+            "title": "Carryover Effect",
+            "description": "前一次执行的结果影响下一次",
+            "impact": "同一个用户连续使用可能产生偏差",
+            "mitigation": "按用户分组而不是按请求分组"
+        }
+    ]
+```
 
-第三层是工程控制：通过结构化输入输出、状态机、权限分级、人工确认、执行轨迹、回归测试和灰度发布，把不确定的模型行为约束在可管理范围内。
+### 评估指标
+
+```python
+class ABTestMetrics:
+    """
+    A/B 测试评估指标
+    """
+    
+    PRIMARY_METRICS = {
+        "task_completion_rate": {
+            "type": "primary",
+            "description": "任务完成率"
+        },
+        "user_satisfaction": {
+            "type": "primary",
+            "description": "用户满意度（点赞率）"
+        },
+        "cost_per_task": {
+            "type": "primary",
+            "description": "单任务成本"
+        }
+    }
+    
+    SECONDARY_METRICS = {
+        "avg_latency": "平均响应时间",
+        "tool_accuracy": "工具调用准确率",
+        "intervention_rate": "人工介入率",
+        "token_efficiency": "Token 效率"
+    }
+    
+    @staticmethod
+    def significance_test(
+        control: List[float],
+        treatment: List[float],
+        alpha: float = 0.05
+    ) -> TestResult:
+        """
+        显著性检验
+        """
+        from scipy import stats
+        
+        t_stat, p_value = stats.ttest_ind(control, treatment)
+        
+        return TestResult(
+            significant=p_value < alpha,
+            p_value=p_value,
+            t_statistic=t_stat,
+            control_mean=mean(control),
+            treatment_mean=mean(treatment),
+            lift=(mean(treatment) - mean(control)) / mean(control)
+        )
+```
+
+### 实验周期
+
+```python
+class ExperimentDuration:
+    """
+    实验持续时间计算
+    """
+    
+    @staticmethod
+    def calculate_required_duration(
+        baseline_rate: float,
+        minimum_detectable_effect: float,
+        daily_traffic: int
+    ) -> int:
+        """
+        计算需要的实验天数
+        """
+        # 简化的样本量计算
+        z_alpha = 1.96  # 95% 置信度
+        z_beta = 0.84   # 80% 统计功效
+        
+        p_pooled = baseline_rate * (1 - baseline_rate)
+        effect_size = minimum_detectable_effect ** 2
+        
+        sample_size_per_group = int(
+            2 * p_pooled * (z_alpha + z_beta) ** 2 / effect_size
+        )
+        
+        days_needed = math.ceil(
+            sample_size_per_group / (daily_traffic / 2)
+        )
+        
+        return max(days_needed, 7)  # 至少跑 7 天
+    
+    DURATION_RECOMMENDATIONS = {
+        "high_traffic": {
+            "daily_sessions": "1000+",
+            "recommended_days": "7-14"
+        },
+        "medium_traffic": {
+            "daily_sessions": "100-1000",
+            "recommended_days": "14-28"
+        },
+        "low_traffic": {
+            "daily_sessions": "< 100",
+            "recommended_days": "28+ 或不适合 A/B 测试"
+        }
+    }
+```
 
 ## 工程实践
 
-- 先定义输入、输出、边界和失败条件，再选择模型或框架
-- 对关键决策保留结构化记录，方便调试和评测
-- 对高风险动作加入权限校验、人工确认和审计日志
-- 用固定测试集验证改动效果，避免只凭单次演示判断质量
-- 将失败案例沉淀为回归测试，持续改进系统稳定性
+### A/B 测试平台集成
+
+```python
+class ABTestPlatform:
+    """
+    A/B 测试平台
+    """
+    
+    def __init__(self):
+        self.experiments: Dict[str, Experiment] = {}
+    
+    def start_experiment(self, config: ABTestConfig):
+        """启动实验"""
+        exp = Experiment(config)
+        self.experiments[config.name] = exp
+        
+        # 注册分流
+        self.traffic_splitter.register(
+            config.name,
+            config.traffic_split
+        )
+        
+        # 记录实验元信息
+        self.metadata[config.name] = {
+            "started_at": datetime.now(),
+            "config": config,
+            "status": "running"
+        }
+    
+    def stop_experiment(self, name: str):
+        """停止实验并分析结果"""
+        exp = self.experiments[name]
+        
+        # 收集数据
+        result = self.analyzer.analyze(exp, exp.duration_days)
+        
+        # 记录
+        self.metadata[name]["status"] = "completed"
+        self.metadata[name]["result"] = result
+        
+        # 清理分流规则
+        self.traffic_splitter.remove(name)
+        
+        return result
+    
+    def get_running_experiments(self) -> List[str]:
+        """获取正在运行的实验"""
+        return [
+            name for name, meta in self.metadata.items()
+            if meta['status'] == 'running'
+        ]
+```
 
 ## 常见误区
 
-- 只解释概念，不讲系统如何落地
-- 把模型能力当成系统可靠性，忽略工具、权限和评测
-- 只关注成功路径，不考虑异常、攻击和成本
-- 用一个漂亮演示代替长期可复现的评测结果
+- **样本量不够就下结论**：跑了两小时发现 treatment 好了 5% 就宣布胜利。智能体的随机波动很大，需要足够的样本量才能排除随机性
+- **同时跑太多实验**：实验之间有交互影响，且分流导致每组样本太少。建议最多同时跑 2-3 个实验
+- **只看平均值不看分布**：treatment 可能对 90% 用户更好但对 10% 用户极差。需要看分布而不是只看平均值
+- **提前停止实验**：每周检查一次结果，看到显著了就停。多次检查需要做多重假设校正
+- **忽略 Novely Effect**：用户对新版本的好奇可能短期拉高满意度。跑满至少一个完整的业务周期
 
 ## 追问方向
 
-- 如果模型判断错了，系统如何发现并恢复？
-- 这个模块的输入输出应该如何结构化？
-- 如何设计测试集来验证这个能力？
-- 线上失败案例如何回流到评测体系？
-- 如果成本、延迟和质量冲突，你会如何取舍？
+- 你的 A/B 测试最小 detectable effect 是多少？需要多大的样本量？
+- 如何处理"treatment 在 A 指标提升了 3%，但在 B 指标下降了 5%"的 trade-off？
+- 如果你只有 100 个用户/天，你还做 A/B 测试吗？替代方案是什么？
+- 线上线下结果不一致（离线评测好但线上 A/B 没提升）怎么办？
 
 ## 学习建议
 
-准备这个问题时，不要只背定义。建议结合一个具体项目来讲：用户提出任务后，系统如何理解、检索、调用工具、记录轨迹、处理失败并最终评估效果。面试中能把抽象概念落到一条完整执行链路上，会明显更有说服力。
+从一个简单的实验开始：改一行 prompt（比如改一个工具的描述），然后跑一周 A/B 测试。重点关注"怎么定义评估指标"和"怎么判断显著性"这两个环节。不要一上来就做多变量实验。能从 A/A 测试（对照组 vs 自己）中得到"没有显著差异"的结论，说明你的实验平台搭对了。
